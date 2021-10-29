@@ -100,7 +100,7 @@ def get_exchange(
 
 
 def create_account_instance(
-    start_time, end_time, benchmark: str, account: Union[float, int, dict], pos_type: str = "Position"
+    start_time, end_time, benchmark: str, account: Union[float, int, dict], pos_type: str = "Position", freq: str="day"
 ) -> Account:
     """
     # TODO: is very strange pass benchmark_config in the account(maybe for report)
@@ -152,6 +152,7 @@ def create_account_instance(
             "end_time": end_time,
         },
         "pos_type": pos_type,
+        "freq": freq
     }
     kwargs.update(pos_kwargs)
     return Account(**kwargs)
@@ -175,7 +176,8 @@ def get_strategy_executor(
     from .executor import BaseExecutor
 
     trade_account = create_account_instance(
-        start_time=start_time, end_time=end_time, benchmark=benchmark, account=account, pos_type=pos_type
+        start_time=start_time, end_time=end_time, benchmark=benchmark, account=account, pos_type=pos_type,
+        freq=executor["kwargs"]["time_per_step"]
     )
 
     exchange_kwargs = copy.copy(exchange_kwargs)
