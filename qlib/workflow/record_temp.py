@@ -13,6 +13,7 @@ from ..contrib.evaluate import risk_analysis, indicator_analysis
 from ..data.dataset import DatasetH
 from ..data.dataset.handler import DataHandlerLP
 from ..backtest import backtest as normal_backtest
+from ..backtest import my_backtest
 from ..log import get_module_logger
 from ..utils import flatten_dict, class_casting
 from ..utils.time import Freq
@@ -489,4 +490,180 @@ class PortAnaRecord(RecordTemp):
                 list_path.append(f"indicator_analysis_{_analysis_freq}.pkl")
             else:
                 warnings.warn(f"indicator_analysis freq {_analysis_freq} is not found")
+        return list_path
+
+
+class MyPortAnaRecord(RecordTemp):
+    """
+    This is the Portfolio Analysis Record class that generates the analysis results such as those of backtest. This class inherits the ``RecordTemp`` class.
+
+    The following files will be stored in recorder
+    - report_normal.pkl & positions_normal.pkl:
+        - The return report and detailed positions of the backtest, returned by `qlib/contrib/evaluate.py:backtest`
+    - port_analysis.pkl : The risk analysis of your portfolio, returned by `qlib/contrib/evaluate.py:risk_analysis`
+    """
+
+    artifact_path = "portfolio_analysis"
+
+    def __init__(
+        self,
+        recorder,
+        config,
+        risk_analysis_freq: Union[List, str] = None,
+        indicator_analysis_freq: Union[List, str] = None,
+        indicator_analysis_method=None,
+        **kwargs,
+    ):
+        """
+        config["strategy"] : dict
+            define the strategy class as well as the kwargs.
+        config["executor"] : dict
+            define the executor class as well as the kwargs.
+        config["backtest"] : dict
+            define the backtest kwargs.
+        risk_analysis_freq : str|List[str]
+            risk analysis freq of report
+        indicator_analysis_freq : str|List[str]
+            indicator analysis freq of report
+        indicator_analysis_method : str, optional, default by None
+            the candidated values include 'mean', 'amount_weighted', 'value_weighted'
+        """
+        super().__init__(recorder=recorder, **kwargs)
+
+        self.strategy_config = config["strategy"]
+        _default_executor_config = {
+            "class": "SimulatorExecutor",
+            "module_path": "qlib.backtest.executor",
+            "kwargs": {
+                "time_per_step": "day",
+                "generate_portfolio_metrics": True,
+            },
+        }
+        self.executor_config = config.get("executor", _default_executor_config)
+        self.backtest_config = config["backtest"]
+
+        self.all_freq = self._get_report_freq(self.executor_config)
+        if risk_analysis_freq is None:
+            risk_analysis_freq = [self.all_freq[0]]
+        if indicator_analysis_freq is None:
+            indicator_analysis_freq = [self.all_freq[0]]
+
+        if isinstance(risk_analysis_freq, str):
+            risk_analysis_freq = [risk_analysis_freq]
+        if isinstance(indicator_analysis_freq, str):
+            indicator_analysis_freq = [indicator_analysis_freq]
+
+        self.risk_analysis_freq = [
+            "{0}{1}".format(*Freq.parse(_analysis_freq)) for _analysis_freq in risk_analysis_freq
+        ]
+        self.indicator_analysis_freq = [
+            "{0}{1}".format(*Freq.parse(_analysis_freq)) for _analysis_freq in indicator_analysis_freq
+        ]
+        self.indicator_analysis_method = indicator_analysis_method
+
+    def _get_report_freq(self, executor_config):
+        ret_freq = []
+        if executor_config["kwargs"].get("generate_portfolio_metrics", False):
+            _count, _freq = Freq.parse(executor_config["kwargs"]["time_per_step"])
+            ret_freq.append(f"{_count}{_freq}")
+        if "sub_env" in executor_config["kwargs"]:
+            ret_freq.extend(self._get_report_freq(executor_config["kwargs"]["sub_env"]))
+        return ret_freq
+
+    def generate(self, **kwargs):
+        # custom strategy and get backtest
+        portfolio_metric_dict, indicator_dict, trade_strategy = my_backtest(
+            executor=self.executor_config, strategy=self.strategy_config, **self.backtest_config
+        )
+        self.trade_strategy = trade_strategy
+        for _freq, (report_normal, positions_normal) in portfolio_metric_dict.items():
+            self.recorder.save_objects(
+                **{f"report_normal_{_freq}.pkl": report_normal}, artifact_path=PortAnaRecord.get_path()
+            )
+            self.recorder.save_objects(
+                **{f"positions_normal_{_freq}.pkl": positions_normal}, artifact_path=PortAnaRecord.get_path()
+            )
+
+        for _freq, indicators_normal in indicator_dict.items():
+            self.recorder.save_objects(
+                **{f"indicators_normal_{_freq}.pkl": indicators_normal}, artifact_path=PortAnaRecord.get_path()
+            )
+
+        for _analysis_freq in self.risk_analysis_freq:
+            if _analysis_freq not in portfolio_metric_dict:
+                warnings.warn(
+                    f"the freq {_analysis_freq} report is not found, please set the corresponding env with `generate_portfolio_metrics=True`"
+                )
+            else:
+                report_normal, _ = portfolio_metric_dict.get(_analysis_freq)
+                analysis = dict()
+                analysis["excess_return_without_cost"] = risk_analysis(
+                    report_normal["return"] - report_normal["bench"], freq=_analysis_freq
+                )
+                analysis["excess_return_with_cost"] = risk_analysis(
+                    report_normal["return"] - report_normal["bench"] - report_normal["cost"], freq=_analysis_freq
+                )
+
+                analysis_df = pd.concat(analysis)  # type: pd.DataFrame
+                # log metrics
+                analysis_dict = flatten_dict(analysis_df["risk"].unstack().T.to_dict())
+                self.recorder.log_metrics(**{f"{_analysis_freq}.{k}": v for k, v in analysis_dict.items()})
+                # save results
+                self.recorder.save_objects(
+                    **{f"port_analysis_{_analysis_freq}.pkl": analysis_df}, artifact_path=PortAnaRecord.get_path()
+                )
+                logger.info(
+                    f"Portfolio analysis record 'port_analysis_{_analysis_freq}.pkl' has been saved as the artifact of the Experiment {self.recorder.experiment_id}"
+                )
+                # print out results
+                pprint(f"The following are analysis results of benchmark return({_analysis_freq}).")
+                pprint(risk_analysis(report_normal["bench"], freq=_analysis_freq))
+                pprint(f"The following are analysis results of the excess return without cost({_analysis_freq}).")
+                pprint(analysis["excess_return_without_cost"])
+                pprint(f"The following are analysis results of the excess return with cost({_analysis_freq}).")
+                pprint(analysis["excess_return_with_cost"])
+
+        for _analysis_freq in self.indicator_analysis_freq:
+            if _analysis_freq not in indicator_dict:
+                warnings.warn(f"the freq {_analysis_freq} indicator is not found")
+            else:
+                indicators_normal = indicator_dict.get(_analysis_freq)
+                if self.indicator_analysis_method is None:
+                    analysis_df = indicator_analysis(indicators_normal)
+                else:
+                    analysis_df = indicator_analysis(indicators_normal, method=self.indicator_analysis_method)
+                # log metrics
+                analysis_dict = analysis_df["value"].to_dict()
+                self.recorder.log_metrics(**{f"{_analysis_freq}.{k}": v for k, v in analysis_dict.items()})
+                # save results
+                self.recorder.save_objects(
+                    **{f"indicator_analysis_{_analysis_freq}.pkl": analysis_df}, artifact_path=PortAnaRecord.get_path()
+                )
+                logger.info(
+                    f"Indicator analysis record 'indicator_analysis_{_analysis_freq}.pkl' has been saved as the artifact of the Experiment {self.recorder.experiment_id}"
+                )
+                pprint(f"The following are analysis results of indicators({_analysis_freq}).")
+                pprint(analysis_df)
+
+    def list(self):
+        list_path = []
+        for _freq in self.all_freq:
+            list_path.extend(
+                [
+                    PortAnaRecord.get_path(f"report_normal_{_freq}.pkl"),
+                    PortAnaRecord.get_path(f"positions_normal_{_freq}.pkl"),
+                ]
+            )
+        for _analysis_freq in self.risk_analysis_freq:
+            if _analysis_freq in self.all_freq:
+                list_path.append(PortAnaRecord.get_path(f"port_analysis_{_analysis_freq}.pkl"))
+            else:
+                warnings.warn(f"risk_analysis freq {_analysis_freq} is not found")
+
+        for _analysis_freq in self.indicator_analysis_freq:
+            if _analysis_freq in self.all_freq:
+                list_path.append(PortAnaRecord.get_path(f"indicator_analysis_{_analysis_freq}.pkl"))
+            else:
+                warnings.warn(f"indicator_analysis freq {_analysis_freq} is not found")
+
         return list_path

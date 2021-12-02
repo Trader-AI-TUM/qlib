@@ -255,6 +255,67 @@ def backtest(
     return portfolio_metrics, indicator
 
 
+def my_backtest(
+    start_time,
+    end_time,
+    strategy,
+    executor,
+    benchmark="SH000300",
+    account=1e9,
+    exchange_kwargs={},
+    pos_type: str = "Position",
+):
+    """initialize the strategy and executor, then backtest function for the interaction of the outermost strategy and executor in the nested decision execution
+
+    Parameters
+    ----------
+    start_time : pd.Timestamp|str
+        closed start time for backtest
+        **NOTE**: This will be applied to the outmost executor's calendar.
+    end_time : pd.Timestamp|str
+        closed end time for backtest
+        **NOTE**: This will be applied to the outmost executor's calendar.
+        E.g. Executor[day](Executor[1min]),   setting `end_time == 20XX0301` will include all the minutes on 20XX0301
+    strategy : Union[str, dict, BaseStrategy]
+        for initializing outermost portfolio strategy. Please refer to the docs of init_instance_by_config for more information.
+    executor : Union[str, dict, BaseExecutor]
+        for initializing the outermost executor.
+    benchmark: str
+        the benchmark for reporting.
+    account : Union[float, int, Position]
+        information for describing how to creating the account
+        For `float` or `int`:
+            Using Account with only initial cash
+        For `Position`:
+            Using Account with a Position
+    exchange_kwargs : dict
+        the kwargs for initializing Exchange
+    pos_type : str
+        the type of Position.
+
+    Returns
+    -------
+    portfolio_metrics_dict: Dict[PortfolioMetrics]
+        it records the trading portfolio_metrics information
+    indicator_dict: Dict[Indicator]
+        it computes the trading indicator
+        It is organized in a dict format
+
+    """
+    trade_strategy, trade_executor = get_strategy_executor(
+        start_time,
+        end_time,
+        strategy,
+        executor,
+        benchmark,
+        account,
+        exchange_kwargs,
+        pos_type=pos_type,
+    )
+    portfolio_metrics, indicator = backtest_loop(start_time, end_time, trade_strategy, trade_executor)
+    return portfolio_metrics, indicator, trade_strategy
+
+
 def collect_data(
     start_time,
     end_time,
